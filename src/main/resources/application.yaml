@@ -1,3 +1,12 @@
+server:
+  port: 8080
+
 spring:
+  profiles:
+    active: local
   application:
     name: llm-agent-service
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.RedisAutoConfiguration

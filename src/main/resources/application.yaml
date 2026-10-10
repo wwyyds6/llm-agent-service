@@ -8,5 +8,14 @@ spring:
     name: llm-agent-service
   autoconfigure:
     exclude:
-      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
       - org.springframework.boot.data.redis.autoconfigure.RedisAutoConfiguration
+
+mybatis:
+  configuration:
+    # 数据库的 created_at 自动映射到 Java 的 createdAt
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    # 打印 MyBatis 执行的 SQL（方便调试，上线可以关掉）
+    com.wangqihui.llmagent.mapper: debug

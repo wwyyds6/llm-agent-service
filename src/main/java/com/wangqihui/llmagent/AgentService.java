@@ -10,6 +10,12 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.function.Consumer;
 
 @Service
 public class AgentService {
@@ -131,6 +137,184 @@ public class AgentService {
         }
 
         return "抱歉，任务步骤过多，已停止。";
+    }
+    // ==================== 流式 + 工具调用融合 ====================
+
+    /** 工具调用分片的回调：index 用于把分片拼回同一个调用 */
+    @FunctionalInterface
+    public interface ToolCallDeltaConsumer {
+        void accept(int index, String id, String name, String argumentsDelta);
+    }
+
+    private static final int MAX_ROUNDS = 5;
+
+    /**
+     * 流式 Agent 循环
+     * @param messages    初始消息（含系统提示词 + 历史 + 本轮用户消息），会在循环中被追加
+     * @param onDelta     正文分片回调（直接推给前端）
+     * @param onToolEvent 工具调用通知回调（前端展示"调用了什么工具"）
+     */
+    public void chatStreamWithTools(ArrayNode messages,
+                                    Consumer<String> onDelta,
+                                    Consumer<ObjectNode> onToolEvent) {
+
+        for (int round = 1; round <= MAX_ROUNDS; round++) {
+            System.out.println("[Agent] 第 " + round + " 轮流式请求模型");
+
+            StringBuilder content = new StringBuilder();
+
+            // 按 index 累积工具调用分片
+            Map<Integer, String> ids = new LinkedHashMap<>();
+            Map<Integer, String> names = new LinkedHashMap<>();
+            Map<Integer, StringBuilder> args = new LinkedHashMap<>();
+
+            streamOnce(messages,
+                    delta -> {
+                        content.append(delta);
+                        onDelta.accept(delta);
+                    },
+                    (index, id, name, argDelta) -> {
+                        if (id != null && !id.isEmpty()) {
+                            ids.putIfAbsent(index, id);
+                        }
+                        if (name != null && !name.isEmpty()) {
+                            names.putIfAbsent(index, name);
+                        }
+                        args.computeIfAbsent(index, k -> new StringBuilder())
+                                .append(argDelta == null ? "" : argDelta);
+                    });
+
+            // 没有工具调用 → 刚才流式输出的就是最终答案
+            if (ids.isEmpty()) {
+                System.out.println("[Agent] 得到最终回答");
+                return;
+            }
+
+            // 有工具调用：先把 assistant 的工具请求消息加进历史
+            ObjectNode assistantMsg = mapper.createObjectNode();
+            assistantMsg.put("role", "assistant");
+            assistantMsg.put("content", content.toString());
+
+            ArrayNode toolCallsArr = mapper.createArrayNode();
+            for (Integer index : ids.keySet()) {
+                ObjectNode tc = mapper.createObjectNode();
+                tc.put("id", ids.get(index));
+                tc.put("type", "function");
+
+                ObjectNode fn = mapper.createObjectNode();
+                fn.put("name", names.getOrDefault(index, ""));
+                fn.put("arguments", args.getOrDefault(index, new StringBuilder()).toString());
+                tc.set("function", fn);
+
+                toolCallsArr.add(tc);
+            }
+            assistantMsg.set("tool_calls", toolCallsArr);
+            messages.add(assistantMsg);
+
+            // 执行每个工具
+            for (Integer index : ids.keySet()) {
+                String callId = ids.get(index);
+                String toolName = names.getOrDefault(index, "");
+                String argsJson = args.getOrDefault(index, new StringBuilder()).toString();
+                if (argsJson.isBlank()) {
+                    argsJson = "{}";
+                }
+
+                long start = System.currentTimeMillis();
+                String result = toolService.execute(toolName, argsJson);
+                long cost = System.currentTimeMillis() - start;
+                boolean success = result != null && !result.startsWith("工具执行失败");
+
+                System.out.println("[Agent] 调用工具: " + toolName
+                        + " 参数: " + argsJson + " → " + result + " (" + cost + "ms)");
+
+                // 落库
+                ToolCallLog log = new ToolCallLog();
+                log.setToolName(toolName);
+                log.setArguments(argsJson);
+                log.setResult(result);
+                log.setCostMs((int) cost);
+                log.setSuccess(success);
+                toolCallLogMapper.insert(log);
+
+                // 通知前端
+                ObjectNode ev = mapper.createObjectNode();
+                ev.put("name", toolName);
+                ev.put("arguments", argsJson);
+                ev.put("result", result);
+                ev.put("costMs", (int) cost);
+                ev.put("success", success);
+                onToolEvent.accept(ev);
+
+                // 工具结果回灌模型
+                ObjectNode toolMsg = mapper.createObjectNode();
+                toolMsg.put("role", "tool");
+                toolMsg.put("tool_call_id", callId);
+                toolMsg.put("content", result);
+                messages.add(toolMsg);
+            }
+        }
+
+        System.out.println("[Agent] 达到最大轮次，停止");
+    }
+
+    /** 单轮流式请求：正文分片走 onDelta，工具调用分片走 onToolCallDelta */
+    private void streamOnce(ArrayNode messages,
+                            Consumer<String> onDelta,
+                            ToolCallDeltaConsumer onToolCallDelta) {
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", model);
+        body.put("stream", true);
+        body.set("messages", messages);
+        body.set("tools", mapper.readTree(TOOLS_JSON));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Authorization", "Bearer " + apiKey);
+
+        final String bodyStr = body.toString();
+
+        restTemplate.execute(
+                baseUrl + "/chat/completions",
+                HttpMethod.POST,
+                req -> {
+                    req.getHeaders().putAll(headers);
+                    req.getBody().write(bodyStr.getBytes(StandardCharsets.UTF_8));
+                },
+                resp -> {
+                    try (BufferedReader reader = new BufferedReader(
+                            new InputStreamReader(resp.getBody(), StandardCharsets.UTF_8))) {
+
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            if (!line.startsWith("data:")) continue;
+                            String json = line.substring(5).trim();
+                            if ("[DONE]".equals(json)) break;
+
+                            try {
+                                JsonNode delta = mapper.readTree(json)
+                                        .path("choices").path(0).path("delta");
+
+                                String text = delta.path("content").asText();
+                                if (!text.isEmpty()) {
+                                    onDelta.accept(text);
+                                }
+
+                                for (JsonNode tc : delta.path("tool_calls")) {
+                                    onToolCallDelta.accept(
+                                            tc.path("index").asInt(),
+                                            tc.path("id").asText(),
+                                            tc.path("function").path("name").asText(),
+                                            tc.path("function").path("arguments").asText());
+                                }
+                            } catch (Exception ignored) {
+                                // 个别分片解析失败就跳过
+                            }
+                        }
+                    }
+                    return null;
+                });
     }
 
     /** 构造一条消息 */

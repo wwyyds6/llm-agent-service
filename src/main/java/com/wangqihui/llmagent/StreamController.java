@@ -1,36 +1,79 @@
 package com.wangqihui.llmagent;
 
+import com.wangqihui.llmagent.entity.Message;
+import com.wangqihui.llmagent.mapper.MessageMapper;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
+
+import java.util.List;
 
 @RestController
 public class StreamController {
 
-    private final LlmService llmService;
+    /** 系统提示词：由服务端统一控制，不依赖前端传 */
+    private static final String SYSTEM_PROMPT =
+            "你是一个乐于助人的中文AI助手。请用纯文本自然段落回答，"
+            + "不要使用任何 Markdown 语法（如 ** 加粗、# 标题、- 列表符号），回答简洁准确。";
 
-    public StreamController(LlmService llmService) {
+    /** 最多带入多少条历史消息，防止上下文过长导致 token 爆炸 */
+    private static final int MAX_HISTORY = 20;
+
+    private final LlmService llmService;
+    private final MessageMapper messageMapper;
+    private final ObjectMapper objectMapper;
+
+    public StreamController(LlmService llmService,
+                            MessageMapper messageMapper,
+                            ObjectMapper objectMapper) {
         this.llmService = llmService;
+        this.messageMapper = messageMapper;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * 流式对话（带历史记录）
-     * 前端 POST 一个 JSON 字符串，内容是历史消息数组
+     * 流式对话
+     * @param conversationId 会话ID（前端先调 POST /conversation 创建）
+     * @param userMessage    本轮用户输入（纯文本）
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@RequestBody String historyJson) {
+    public SseEmitter chatStream(@RequestParam("conversationId") Long conversationId,
+                                 @RequestBody String userMessage) {
+
+        // 1. 先把用户消息落库
+        Message userMsg = new Message();
+        userMsg.setConversationId(conversationId);
+        userMsg.setRole("user");
+        userMsg.setContent(userMessage);
+        messageMapper.insert(userMsg);
+
+        // 2. 从数据库读出历史，组装成模型需要的 messages 数组
+        String messagesJson = buildMessagesJson(conversationId);
 
         SseEmitter emitter = new SseEmitter(0L);
 
         new Thread(() -> {
+            StringBuilder fullAnswer = new StringBuilder();
             try {
-                llmService.chatStreamWithHistory(historyJson, delta -> {
+                llmService.chatStreamWithHistory(messagesJson, delta -> {
+                    fullAnswer.append(delta);
                     try {
                         emitter.send(delta);
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 });
+
+                // 3. 流结束后把 AI 回复落库
+                Message aiMsg = new Message();
+                aiMsg.setConversationId(conversationId);
+                aiMsg.setRole("assistant");
+                aiMsg.setContent(fullAnswer.toString());
+                messageMapper.insert(aiMsg);
+
                 emitter.complete();
             } catch (Exception e) {
                 emitter.completeWithError(e);
@@ -38,5 +81,29 @@ public class StreamController {
         }).start();
 
         return emitter;
+    }
+
+    /** 系统提示词 + 最近 N 条历史 → OpenAI 格式的 JSON 数组 */
+    private String buildMessagesJson(Long conversationId) {
+        List<Message> all = messageMapper.findByConversationId(conversationId);
+
+        List<Message> recent = all.size() > MAX_HISTORY
+                ? all.subList(all.size() - MAX_HISTORY, all.size())
+                : all;
+
+        ArrayNode arr = objectMapper.createArrayNode();
+
+        ObjectNode sys = objectMapper.createObjectNode();
+        sys.put("role", "system");
+        sys.put("content", SYSTEM_PROMPT);
+        arr.add(sys);
+
+        for (Message m : recent) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("role", m.getRole());
+            node.put("content", m.getContent());
+            arr.add(node);
+        }
+        return arr.toString();
     }
 }

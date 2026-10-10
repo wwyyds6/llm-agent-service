@@ -80,12 +80,8 @@
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
 
-    // 系统提示词：约束模型的输出风格（这属于 Prompt 工程）
-    const SYSTEM_PROMPT = '你是一个乐于助人的中文AI助手。请用纯文本自然段落回答，' +
-        '不要使用任何 Markdown 语法（如 ** 加粗、# 标题、- 列表符号），' +
-        '回答简洁准确。';
-
-    let history = [{ role: 'system', content: SYSTEM_PROMPT }];
+    // 当前会话ID（由服务端管理，页面加载时获取）
+    let conversationId = null;
 
     function addMessage(role, text) {
         const div = document.createElement('div');
@@ -96,57 +92,64 @@
         return div;
     }
 
+    /** 页面加载时：取最近的会话，没有就新建 */
+    async function initConversation() {
+        try {
+            const list = await (await fetch('/conversation')).json();
+            if (list.length > 0) {
+                conversationId = list[0].id;
+                await loadMessages();
+            } else {
+                const created = await (await fetch('/conversation', { method: 'POST' })).json();
+                conversationId = created.id;
+            }
+            console.log('当前会话ID =', conversationId);
+        } catch (e) {
+            alert('初始化会话失败：' + e.message);
+        }
+    }
+
+    /** 从数据库恢复历史消息 */
+    async function loadMessages() {
+        const msgs = await (await fetch('/conversation/' + conversationId + '/messages')).json();
+        messagesEl.innerHTML = '';
+        msgs.forEach(m => addMessage(m.role === 'user' ? 'user' : 'assistant', m.content));
+    }
+
     function send() {
         const text = inputEl.value.trim();
-        if (!text) return;
+        if (!text || !conversationId) return;
 
         addMessage('user', text);
         inputEl.value = '';
         sendBtn.disabled = true;
-
-        // 把用户这条也记进历史
-        history.push({ role: 'user', content: text });
-
-        // 只保留最近 20 条，避免上下文过长导致 token 爆炸
-        if (history.length > 20) {
-            history = history.slice(history.length - 20);
-        }
 
         const aiDiv = addMessage('assistant', '');
         const cursor = document.createElement('span');
         cursor.className = 'cursor';
         aiDiv.appendChild(cursor);
 
-        let fullAnswer = '';
-
-        // 用 fetch 发 POST（EventSource 不支持 POST）
-        fetch('/chat/stream', {
+        fetch('/chat/stream?conversationId=' + conversationId, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(history)
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            body: text
         }).then(response => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
             const reader = response.body.getReader();
             const decoder = new TextDecoder('utf-8');
 
             function read() {
                 reader.read().then(({ done, value }) => {
                     if (done) {
-                        // 流结束：把 AI 的完整回答记进历史
-                        history.push({ role: 'assistant', content: fullAnswer });
                         cursor.remove();
                         sendBtn.disabled = false;
                         return;
                     }
                     const chunk = decoder.decode(value, { stream: true });
-
-                    // 解析 SSE 格式：每块形如 "data:内容\n\n"
                     chunk.split('\n').forEach(line => {
                         if (!line.startsWith('data:')) return;
-                        const content = line.substring(5);
-                        fullAnswer += content;
-                        cursor.insertAdjacentText('beforebegin', content);
+                        cursor.insertAdjacentText('beforebegin', line.substring(5));
                     });
-
                     messagesEl.scrollTop = messagesEl.scrollHeight;
                     read();
                 });
@@ -163,6 +166,9 @@
     inputEl.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') send();
     });
+
+    // 页面加载完成就初始化会话
+    initConversation();
 </script>
 </body>
 </html>

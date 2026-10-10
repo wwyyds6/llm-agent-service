@@ -1,5 +1,7 @@
 package com.wangqihui.llmagent;
 
+import com.wangqihui.llmagent.entity.ToolCallLog;
+import com.wangqihui.llmagent.mapper.ToolCallLogMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -15,6 +17,7 @@ public class AgentService {
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper;
     private final ToolService toolService;
+    private final ToolCallLogMapper toolCallLogMapper;
 
     @Value("${deepseek.api-key}")
     private String apiKey;
@@ -56,10 +59,14 @@ public class AgentService {
             ]
             """;
 
-    public AgentService(RestTemplate restTemplate, ObjectMapper mapper, ToolService toolService) {
+    public AgentService(RestTemplate restTemplate,
+                        ObjectMapper mapper,
+                        ToolService toolService,
+                        ToolCallLogMapper toolCallLogMapper) {
         this.restTemplate = restTemplate;
         this.mapper = mapper;
         this.toolService = toolService;
+        this.toolCallLogMapper = toolCallLogMapper;
     }
 
     /**
@@ -101,7 +108,17 @@ public class AgentService {
                 String result = toolService.execute(toolName, argsJson);
                 long cost = System.currentTimeMillis() - start;
 
+                boolean success = result != null && !result.startsWith("工具执行失败");
                 System.out.println("[Agent] 工具返回: " + result + " 耗时: " + cost + "ms");
+
+                // 把这次工具调用记录进数据库（可观测性 + 成本分析）
+                ToolCallLog log = new ToolCallLog();
+                log.setToolName(toolName);
+                log.setArguments(argsJson);
+                log.setResult(result);
+                log.setCostMs((int) cost);
+                log.setSuccess(success);
+                toolCallLogMapper.insert(log);
 
                 // 5. 工具结果作为 role=tool 的消息回灌给模型
                 ObjectNode toolMsg = mapper.createObjectNode();

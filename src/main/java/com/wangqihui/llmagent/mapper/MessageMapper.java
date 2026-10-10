@@ -14,4 +14,7 @@ public interface MessageMapper {
 
     @Select("SELECT * FROM message WHERE conversation_id = #{conversationId} ORDER BY id ASC")
     List<Message> findByConversationId(@Param("conversationId") Long conversationId);
+
+    @Delete("DELETE FROM message WHERE conversation_id = #{conversationId}")
+    int deleteByConversationId(@Param("conversationId") Long conversationId);
 }

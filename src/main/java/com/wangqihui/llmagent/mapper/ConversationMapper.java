@@ -20,4 +20,7 @@ public interface ConversationMapper {
 
     @Delete("DELETE FROM conversation WHERE id = #{id}")
     int deleteById(@Param("id") Long id);
+
+    @Update("UPDATE conversation SET title = #{title} WHERE id = #{id}")
+    int updateTitle(@Param("id") Long id, @Param("title") String title);
 }

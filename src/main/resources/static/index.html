@@ -76,7 +76,10 @@
 </head>
 <body>
 <div class="app">
-    <header>LLM Agent</header>
+    <header>
+        <span>LLM Agent</span>
+        <button id="newChat" style="float:right;padding:4px 12px;font-size:13px;">+ 新会话</button>
+    </header>
     <div id="messages"></div>
     <footer>
         <input id="input" placeholder="输入消息，回车发送..." autocomplete="off">
@@ -99,7 +102,12 @@
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return div;
     }
-
+    document.getElementById('newChat').addEventListener('click', async function () {
+        const created = await (await fetch('/conversation', { method: 'POST' })).json();
+        conversationId = created.id;
+        messagesEl.innerHTML = '';
+        console.log('已新建会话，ID =', conversationId);
+    });
     async function initConversation() {
         try {
             const list = await (await fetch('/conversation')).json();

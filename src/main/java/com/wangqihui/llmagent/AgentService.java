@@ -1,5 +1,6 @@
 package com.wangqihui.llmagent;
 
+import com.wangqihui.llmagent.common.PromptConstants;
 import com.wangqihui.llmagent.entity.ToolCallLog;
 import com.wangqihui.llmagent.mapper.ToolCallLogMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -58,7 +59,24 @@ public class AgentService {
                         "description": "要计算的数学表达式，例如 1234*5678 或 (3+5)/2"
                       }
                     },
-                    "required": ["expression"]
+                                        "required": ["expression"]
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "queryStudentScore",
+                  "description": "查询学生的成绩记录，包含各科成绩和平均分。当用户询问某个学生（用姓名或学号）的成绩、分数、平均分时调用。",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "student": {
+                        "type": "string",
+                        "description": "学生姓名或学号，例如 测试学生甲 或 S2025001"
+                      }
+                    },
+                    "required": ["student"]
                   }
                 }
               }
@@ -81,7 +99,7 @@ public class AgentService {
     public String chatWithTools(String userMessage) {
         // 1. 构造消息列表
         ArrayNode messages = mapper.createArrayNode();
-        messages.add(message("system", "你是一个中文AI助手，可以调用工具获取真实数据。回答简洁准确。"));
+        messages.add(message("system", PromptConstants.SYSTEM_PROMPT));
         messages.add(message("user", userMessage));
 
         // 2. Agent 循环：最多 5 轮，防止模型无限调用工具

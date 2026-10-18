@@ -1,5 +1,6 @@
 package com.wangqihui.llmagent;
 
+import com.wangqihui.llmagent.common.PromptConstants;
 import com.wangqihui.llmagent.entity.Message;
 import com.wangqihui.llmagent.mapper.MessageMapper;
 import org.springframework.http.MediaType;
@@ -107,7 +108,7 @@ public class StreamController {
 
         ObjectNode sys = objectMapper.createObjectNode();
         sys.put("role", "system");
-        sys.put("content", SYSTEM_PROMPT);
+        sys.put("content", PromptConstants.SYSTEM_PROMPT);
         arr.add(sys);
 
         for (Message m : recent) {

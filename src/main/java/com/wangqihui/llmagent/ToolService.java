@@ -69,7 +69,21 @@ public class ToolService {
         if (expression == null || expression.isBlank()) {
             return "错误：表达式为空";
         }
+
         Object result = parser.parseExpression(expression).getValue();
+
+        // ⭐ SpEL 整数相除会截断（98765/4321 = 22），检测到整数结果且含除法时用 double 重算
+        if (result instanceof Integer && expression.contains("/")) {
+            try {
+                // 把整数字面量改成小数：(?<![\d.]) 避免误伤 3.14 里的 14
+                String doubleExpr = expression.replaceAll("(?<![\\d.])(\\d+)(?![\\d.])", "$1.0");
+                Object precise = parser.parseExpression(doubleExpr).getValue();
+                return expression + " = " + precise;
+            } catch (Exception ignored) {
+                // 转 double 失败就退回整数结果
+            }
+        }
+
         return expression + " = " + result;
     }
     /** 工具 3：查询学生成绩（只读） */
